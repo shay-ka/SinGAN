@@ -6,6 +6,7 @@ from skimage import color
 from math import pi
 #from SinGAN.functions import torch2uint8, np2torch
 import torch
+import math
 
 
 def denorm(x):
@@ -16,25 +17,61 @@ def norm(x):
     out = (x - 0.5) * 2
     return out.clamp(-1, 1)
 
+def norm_audio(x):
+    if isinstance(x, torch.Tensor):
+        x = torch.sign(x) * torch.sqrt(torch.abs(x)) / math.sqrt(32768)
+    elif isinstance(x, np.ndarray):
+        x = np.sign(x) * np.sqrt(np.abs(x)) / math.sqrt(32768)
+    else:
+        print('@ norm_log: unknown type!!! type(x)=', type(x))
+    return x
+
+def denorm_audio(x):
+    if isinstance(x, torch.Tensor):
+        x = torch.sign(x) * (x * math.sqrt(32768)) ** 2
+    elif isinstance(x, np.ndarray):
+        x = np.sign(x) * (x * math.sqrt(32768)) ** 2
+    else:
+        print('@ norm_log: unknown type!!! type(x)=', type(x))
+    return x
+
 def move_to_gpu(t):
     if (torch.cuda.is_available()):
         t = t.to(torch.device('cuda'))
     return t
 
 def np2torch(x,opt):
-    if opt.nc_im == 3:
-        x = x[:,:,:,None]
-        x = x.transpose((3, 2, 0, 1))/255
+    if opt.input_type == 'image':
+        if opt.conv_spectrogram == True:
+            x = x[:, :, :, None]
+            # x = x.transpose((3, 0, 1, 2)) / 255
+            x = x.transpose((3, 2, 0, 1)) / 255
+        else:
+            if opt.nc_im == 3:
+                x = x[:,:,:,None]
+                x = x.transpose((3, 2, 0, 1))/255
+            else:
+                x = color.rgb2gray(x)
+                x = x[:,:,None,None]
+                x = x.transpose(3, 2, 0, 1)
     else:
-        x = color.rgb2gray(x)
-        x = x[:,:,None,None]
-        x = x.transpose(3, 2, 0, 1)
+        x = x[:, :, None]
+        if opt.audio_norm == True:
+            x = x.transpose(2, 0, 1)
+            x = norm_audio(x)
+            x = (x + 1) / 2
+        else:
+            x = x.transpose(2, 0, 1)/32768
     x = torch.from_numpy(x)
     if not (opt.not_cuda):
         x = move_to_gpu(x)
     x = x.type(torch.cuda.FloatTensor) if not(opt.not_cuda) else x.type(torch.FloatTensor)
     #x = x.type(torch.cuda.FloatTensor)
+    # aviod norm / denorm (reverted)
     x = norm(x)
+    # print('@ imresize.np2torch: max(inp)=', torch.max(x), ' | min(inp)=', torch.min(x))
+    # if opt.input_type == 'image':
+    #     x = norm(x)
     return x
 
 def torch2uint8(x):
@@ -48,24 +85,52 @@ def torch2uint8(x):
 
 def imresize(im,scale,opt):
     #s = im.shape
-    im = torch2uint8(im)
-    im = imresize_in(im, scale_factor=scale)
+    # print("@ imresize entry: im.shape = ", im.shape)
+    # print("@ imresize: im = ", im)
+    if opt.input_type == 'image':
+        im = torch2uint8(im)
+    else:
+        if len(im.shape) > 2:
+            im = im[0, :, :]
+        # im = im.permute((1, 0))
+        # aviod norm / denorm (reverted)
+        if opt.audio_norm == True:
+            im = (denorm_audio(im) + math.sqrt(32768)) / 2
+        else:
+            im = 32767 * (denorm(im))
+        # print('@ imresize: max(inp)=', torch.max(im), ' | min(inp)=', torch.min(im))
+        # im = 32768 * im
+        im = im.cpu().numpy()
+    # print("@ imresize after torch2uint8: im.shape = ", im.shape)
+    im = imresize_in(im, opt, scale_factor=scale)
     im = np2torch(im,opt)
+    # print("@ imresize after np2torch: im.shape = ", im.shape)
+    # print("@ imresize: im = ", im)
     #im = im[:, :, 0:int(scale * s[2]), 0:int(scale * s[3])]
+
     return im
 
 def imresize_to_shape(im,output_shape,opt):
     #s = im.shape
-    im = torch2uint8(im)
-    im = imresize_in(im, output_shape=output_shape)
+    if opt.input_type == 'image':
+        im = torch2uint8(im)
+    else:
+        if opt.audio_norm == True:
+            im = (im * 2) - 1
+            im = (denorm_audio(im) + math.sqrt(32768)) / 2
+        else:
+            im = im * 32768
+    im = imresize_in(im, opt, output_shape=output_shape)
     im = np2torch(im,opt)
     #im = im[:, :, 0:int(scale * s[2]), 0:int(scale * s[3])]
     return im
 
 
-def imresize_in(im, scale_factor=None, output_shape=None, kernel=None, antialiasing=True, kernel_shift_flag=False):
+def imresize_in(im, opt, scale_factor=None, output_shape=None, kernel=None, antialiasing=True, kernel_shift_flag=False):
     # First standardize values and fill missing arguments (if needed) by deriving scale from output shape or vice versa
-    scale_factor, output_shape = fix_scale_and_size(im.shape, output_shape, scale_factor)
+    # print('@ imresize_in: im.shape = ', im.shape, ' scale_factor = ', scale_factor)
+    # not sure which dimmention should be checked
+    scale_factor, output_shape = fix_scale_and_size(im.shape, output_shape, scale_factor, opt)
 
     # For a given numeric kernel case, just do convolution and sub-sampling (downscaling only)
     if type(kernel) == np.ndarray and scale_factor[0] <= 1:
@@ -86,18 +151,20 @@ def imresize_in(im, scale_factor=None, output_shape=None, kernel=None, antialias
 
     # Sort indices of dimensions according to scale of each dimension. since we are going dim by dim this is efficient
     sorted_dims = np.argsort(np.array(scale_factor)).tolist()
-
+    # print('@ imresize_in: scale_factor = ', scale_factor)
+    # print('@ imresize_in: sorted_dims = ', sorted_dims)
     # Iterate over dimensions to calculate local weights for resizing and resize each time in one direction
     out_im = np.copy(im)
     for dim in sorted_dims:
         # No point doing calculations for scale-factor 1. nothing will happen anyway
-        if scale_factor[dim] == 1.0:
+        if scale_factor[dim] == 1.0 or im.shape[dim] == output_shape[dim]:
             continue
 
         # for each coordinate (along 1 dim), calculate which coordinates in the input image affect its result and the
         # weights that multiply the values there to get its result.
         weights, field_of_view = contributions(im.shape[dim], output_shape[dim], scale_factor[dim],
                                                method, kernel_width, antialiasing)
+        # print("@ imresize_in: after contributions() | weights.shape=",weights.shape," | field_of_view.shape=",field_of_view.shape)
 
         # Use the affecting position values and the set of weights to calculate the result of resizing along this 1 dim
         out_im = resize_along_dim(out_im, dim, weights, field_of_view)
@@ -105,17 +172,25 @@ def imresize_in(im, scale_factor=None, output_shape=None, kernel=None, antialias
     return out_im
 
 
-def fix_scale_and_size(input_shape, output_shape, scale_factor):
+def fix_scale_and_size(input_shape, output_shape, scale_factor, opt):
     # First fixing the scale-factor (if given) to be standardized the function expects (a list of scale factors in the
     # same size as the number of input dimensions)
     if scale_factor is not None:
         # By default, if scale-factor is a scalar we assume 2d resizing and duplicate it.
         if np.isscalar(scale_factor):
-            scale_factor = [scale_factor, scale_factor]
+            if opt.input_type == 'image':
+                if opt.conv_spectrogram == True:
+                    scale_factor = [1, scale_factor]
+                else:
+                    scale_factor = [scale_factor, scale_factor]
+            else:
+                scale_factor = [scale_factor]
 
         # We extend the size of scale-factor list to the size of the input by assigning 1 to all the unspecified scales
         scale_factor = list(scale_factor)
         scale_factor.extend([1] * (len(input_shape) - len(scale_factor)))
+        if opt.input_type == 'audio':
+            scale_factor.reverse() # adjust dimmentions
 
     # Fixing output-shape (if given): extending it to the size of the input-shape, by assigning the original input-size
     # to all the unspecified dimensions
@@ -139,7 +214,7 @@ def contributions(in_length, out_length, scale, kernel, kernel_width, antialiasi
     # such that each position from the field_of_view will be multiplied with a matching filter from the
     # 'weights' based on the interpolation method and the distance of the sub-pixel location from the pixel centers
     # around it. This is only done for one dimension of the image.
-
+    # print("@ contributions: in_length = ", in_length, "out_length = ", out_length, "scale = ", scale, "kernel = ", kernel, "kernel_width = ", kernel_width, "antialiasing = ", antialiasing)
     # When anti-aliasing is activated (default and only for downscaling) the receptive field is stretched to size of
     # 1/sf. this means filtering is more 'low-pass filter'.
     fixed_kernel = (lambda arg: scale * kernel(scale * arg)) if antialiasing else kernel
@@ -169,8 +244,10 @@ def contributions(in_length, out_length, scale, kernel, kernel_width, antialiasi
     # Determine a set of field_of_view for each each output position, these are the pixels in the input image
     # that the pixel in the output image 'sees'. We get a matrix whos horizontal dim is the output pixels (big) and the
     # vertical dim is the pixels it 'sees' (kernel_size + 2)
+    field_of_view = np.uint(np.expand_dims(left_boundary, axis=1) + np.arange(expanded_kernel_width) - 1)
+    # print("@ contributions: field_of_view.shape = ", field_of_view.shape)
     field_of_view = np.squeeze(np.uint(np.expand_dims(left_boundary, axis=1) + np.arange(expanded_kernel_width) - 1))
-
+    # print("@ contributions: field_of_view.shape = ", field_of_view.shape)
     # Assign weight to each pixel in the field of view. A matrix whos horizontal dim is the output pixels and the
     # vertical dim is a list of weights matching to the pixel in the field of view (that are specified in
     # 'field_of_view')
@@ -184,11 +261,13 @@ def contributions(in_length, out_length, scale, kernel, kernel_width, antialiasi
     # We use this mirror structure as a trick for reflection padding at the boundaries
     mirror = np.uint(np.concatenate((np.arange(in_length), np.arange(in_length - 1, -1, step=-1))))
     field_of_view = mirror[np.mod(field_of_view, mirror.shape[0])]
-
+    # print("@ contributions: field_of_view.shape = ", field_of_view.shape)
     # Get rid of  weights and pixel positions that are of zero weight
     non_zero_out_pixels = np.nonzero(np.any(weights, axis=0))
     weights = np.squeeze(weights[:, non_zero_out_pixels])
+    # print("@ contributions: len(non_zero_out_pixels) = ", len(non_zero_out_pixels))
     field_of_view = np.squeeze(field_of_view[:, non_zero_out_pixels])
+    # field_of_view = np.squeeze(field_of_view[non_zero_out_pixels])
 
     # Final products are the relative positions and the matching weights, both are output_size X fixed_kernel_size
     return weights, field_of_view

@@ -92,25 +92,44 @@ def SinGAN_generate(Gs,Zs,reals,NoiseAmp,opt,in_s=None,scale_v=1,scale_h=1,n=0,g
         in_s = torch.full(reals[0].shape, 0, device=opt.device)
     images_cur = []
     for G,Z_opt,noise_amp in zip(Gs,Zs,NoiseAmp):
+        print("@ SinGAN_generate: Z_opt.shape = ", Z_opt.shape)
         pad1 = ((opt.ker_size-1)*opt.num_layer)/2
-        m = nn.ZeroPad2d(int(pad1))
-        nzx = (Z_opt.shape[2]-pad1*2)*scale_v
-        nzy = (Z_opt.shape[3]-pad1*2)*scale_h
+        if opt.input_type == 'image':
+            m = nn.ZeroPad2d(int(pad1))
+            nzx = (Z_opt.shape[2]-pad1*2)*scale_v
+            nzy = (Z_opt.shape[3]-pad1*2)*scale_h
+        else:
+            m = nn.ConstantPad1d(int(pad1), 0)
+            nzx = 1
+            nzy = (Z_opt.shape[2] - pad1 * 2) * scale_h
 
         images_prev = images_cur
         images_cur = []
 
         for i in range(0,num_samples,1):
             if n == 0:
-                z_curr = functions.generate_noise([1,nzx,nzy], device=opt.device)
-                z_curr = z_curr.expand(1,3,z_curr.shape[2],z_curr.shape[3])
+                if opt.input_type == 'image':
+                    z_curr = functions.generate_noise([1,nzx,nzy], device=opt.device)
+                    if opt.conv_spectrogram == True:
+                        z_curr = z_curr.expand(1, 2, z_curr.shape[2], z_curr.shape[3])
+                    else:
+                        z_curr = z_curr.expand(1,3,z_curr.shape[2],z_curr.shape[3])
+                else:
+                    z_curr = functions.generate_noise([nzx, nzy], device=opt.device)
+                    print("@ SinGAN_generate: z_curr.shape = ", z_curr.shape)
                 z_curr = m(z_curr)
+                print("@ SinGAN_generate: z_curr.shape = ", z_curr.shape)
             else:
-                z_curr = functions.generate_noise([opt.nc_z,nzx,nzy], device=opt.device)
+                if opt.input_type == 'image':
+                    z_curr = functions.generate_noise([opt.nc_z,nzx,nzy], device=opt.device)
+                else:
+                    z_curr = functions.generate_noise([nzx, nzy], device=opt.device)
                 z_curr = m(z_curr)
 
             if images_prev == []:
+                print("@ SinGAN_generate: in_s.shape = ", in_s.shape)
                 I_prev = m(in_s)
+                print("@ SinGAN_generate: I_prev.shape = ", I_prev.shape)
                 #I_prev = m(I_prev)
                 #I_prev = I_prev[:,:,0:z_curr.shape[2],0:z_curr.shape[3]]
                 #I_prev = functions.upsampling(I_prev,z_curr.shape[2],z_curr.shape[3])
@@ -118,12 +137,23 @@ def SinGAN_generate(Gs,Zs,reals,NoiseAmp,opt,in_s=None,scale_v=1,scale_h=1,n=0,g
                 I_prev = images_prev[i]
                 I_prev = imresize(I_prev,1/opt.scale_factor, opt)
                 if opt.mode != "SR":
-                    I_prev = I_prev[:, :, 0:round(scale_v * reals[n].shape[2]), 0:round(scale_h * reals[n].shape[3])]
-                    I_prev = m(I_prev)
-                    I_prev = I_prev[:,:,0:z_curr.shape[2],0:z_curr.shape[3]]
-                    I_prev = functions.upsampling(I_prev,z_curr.shape[2],z_curr.shape[3])
+                    if opt.input_type == 'image':
+                        I_prev = I_prev[:, :, 0:round(scale_v * reals[n].shape[2]), 0:round(scale_h * reals[n].shape[3])]
+                        I_prev = m(I_prev)
+                        I_prev = I_prev[:,:,0:z_curr.shape[2],0:z_curr.shape[3]]
+                        I_prev = functions.upsampling(I_prev,z_curr.shape[2],z_curr.shape[3])
+                    else:
+                        I_prev = I_prev[:, 0:round(scale_v * reals[n].shape[1]), 0:round(scale_h * reals[n].shape[2])]
+                        print("@ SinGAN_generate: I_prev.shape = ", I_prev.shape)
+                        I_prev = m(I_prev)
+                        print("@ SinGAN_generate: I_prev.shape = ", I_prev.shape)
+                        I_prev = I_prev[:, 0:z_curr.shape[1], 0:z_curr.shape[2]]
+                        I_prev = I_prev.expand(1,1,I_prev.shape[1],I_prev.shape[2])
+                        I_prev = functions.upsampling(I_prev, z_curr.shape[1], z_curr.shape[2])
                 else:
+                    print("@ SinGAN_generate: I_prev.shape = ", I_prev.shape)
                     I_prev = m(I_prev)
+                    print("@ SinGAN_generate: I_prev.shape = ", I_prev.shape)
 
             if n < gen_start_scale:
                 z_curr = Z_opt

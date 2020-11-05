@@ -13,7 +13,13 @@ from SinGAN.imresize import imresize
 import os
 import random
 from sklearn.cluster import KMeans
-
+from scipy.io.wavfile import read
+from scipy.io.wavfile import write
+from scipy import signal
+import math
+# debug
+from scipy.fft import fftshift
+# debug
 
 # custom weights initialization called on netG and netD
 
@@ -29,6 +35,24 @@ def norm(x):
     out = (x -0.5) *2
     return out.clamp(-1, 1)
 
+def norm_audio(x):
+    if isinstance(x, torch.Tensor):
+        x = torch.sign(x) * torch.sqrt(torch.abs(x)) / math.sqrt(32768)
+    elif isinstance(x, np.ndarray):
+        x = np.sign(x) * np.sqrt(np.abs(x)) / math.sqrt(32768)
+    else:
+        print('@ norm_log: unknown type!!! type(x)=', type(x))
+    return x
+
+def denorm_audio(x):
+    if isinstance(x, torch.Tensor):
+        x = torch.sign(x) * (x * math.sqrt(32768)) ** 2
+    elif isinstance(x, np.ndarray):
+        x = np.sign(x) * (x * math.sqrt(32768)) ** 2
+    else:
+        print('@ norm_log: unknown type!!! type(x)=', type(x))
+    return x
+
 #def denorm2image(I1,I2):
 #    out = (I1-I1.mean())/(I1.max()-I1.min())
 #    out = out*(I2.max()-I2.min())+I2.mean()
@@ -39,19 +63,89 @@ def norm(x):
 #    return out#.clamp(I2.min(), I2.max())
 
 def convert_image_np(inp):
+    # print("@ convert_image_np: inp.shape = ", inp.shape)
     if inp.shape[1]==3:
         inp = denorm(inp)
         inp = move_to_cpu(inp[-1,:,:,:])
         inp = inp.numpy().transpose((1,2,0))
     else:
         inp = denorm(inp)
-        inp = move_to_cpu(inp[-1,-1,:,:])
+        inp = move_to_cpu(inp[-1,:,:])
         inp = inp.numpy().transpose((0,1))
         # mean = np.array([x/255.0 for x in [125.3,123.0,113.9]])
         # std = np.array([x/255.0 for x in [63.0,62.1,66.7]])
 
     inp = np.clip(inp,0,1)
     return inp
+
+def convert_audio_np(inp, opt):
+    # avoid norm / denorm (reverted)
+    inp = denorm(inp)
+    # print('@ convert_audio_np: max(inp)=', torch.max(inp), ' | min(inp)=', torch.min(inp))
+    inp = move_to_cpu(inp[-1,-1,:])
+    inp = inp.numpy() #.transpose((0,1))
+
+    #inp = np.clip(inp,0,1)
+    # convert to 16bit
+    # avoid norm / denorm (reverted)
+    if opt.audio_norm == True:
+        inp = (inp * 2) - 1
+        inp = denorm_audio(inp)
+    else:
+        inp = inp * 65535 - 32768
+    # inp = inp * 32768
+    inp = inp.astype(np.int16)
+    return inp
+
+def convert_spectrogram_np(inp, opt):
+    # print("@ convert_image_np: inp.shape = ", inp.shape)
+    print("inp.shape = ", inp.shape, " | inp = ", inp)
+    inp = denorm(inp)
+    print("inp.shape = ", inp.shape, " | inp = ", inp)
+    inp = move_to_cpu(inp[-1, :, :, :])
+    # inp = inp.numpy().transpose((1, 2, 0))
+    # print('@ convert_spectrogram_np: inp.shape = ', inp.shape)
+    inp = np.clip(inp,0,1)
+
+    inp_mag = inp[0, :, :]
+    inp_phase = inp[1, :, :]
+    print("inp_mag.shape = ", inp_mag.shape, " | inp_mag = ", inp_mag)
+    print("inp_phase.shape = ", inp_phase.shape, " | inp_phase = ", inp_phase)
+    # return to real scale
+    inp_mag = inp_mag * 255
+    inp_phase = inp_phase * 255
+    print("inp_mag.shape = ", inp_mag.shape, " | inp_mag = ", inp_mag)
+    print("inp_phase.shape = ", inp_phase.shape, " | inp_phase = ", inp_phase)
+    inp_mag = inp_mag / 192 * float(opt.max_mag)
+    inp_phase = inp_phase / 255 * 2 * math.pi - math.pi
+    # reconstruct
+    # debug
+    t = np.arange(inp_mag.shape[1]) # np.arange(inp_mag.shape[0] / 256) * 256 / 8000
+    f = np.fft.fftfreq(inp_mag.shape[0]) * 8000
+    plt.figure(1)
+    plt.pcolormesh(t, fftshift(f), fftshift(inp_mag, axes=0), shading='gouraud')
+    plt.title('inp_mag')
+    # plt.figure(2)
+    # plt.pcolormesh(t, fftshift(f), fftshift(inp_phase, axes=0), shading='gouraud')
+    # plt.title('inp_phase')mi
+    plt.show()
+    print("min(inp_mag) = ", torch.min(inp_mag), " | max(inp_mag) = ", torch.max(inp_mag))
+    print("min(inp_phase) = ", torch.min(inp_phase), " | max(inp_phase) = ", torch.max(inp_phase))
+    # debug
+    print("inp_mag.shape = ", inp_mag.shape, " | inp_mag = ", inp_mag)
+    print("inp_phase.shape = ", inp_phase.shape, " | inp_phase = ", inp_phase)
+    inp_fft_recon = np.multiply(np.sqrt(np.exp(inp_mag) - 1), np.exp(1j * inp_phase))
+    print("inp_fft_recon.shape = ", inp_fft_recon.shape, " | inp_fft_recon = ", inp_fft_recon)
+    inp_recon = np.array([], dtype=float)
+    # print('@ convert_spectrogram_np: inp_mag.shape[0] = ', inp_mag.shape[0], ' | inp_fft_recon.shape = ', inp_fft_recon.shape)
+    for i in range(inp_mag.shape[1]):
+        inp_recon = np.concatenate((inp_recon, np.fft.ifft(inp_fft_recon[:, i])))
+        # TODO: check why it's not perfectly reconstructed in to real values.
+        inp_recon = np.abs(inp_recon)
+    print("inp_recon.shape = ", inp_recon.shape, " | inp_recon = ", inp_recon)
+    inp_recon = inp_recon.astype(np.int16)
+    print("inp_recon.shape = ", inp_recon.shape, " | inp_recon = ", inp_recon)
+    return inp_recon
 
 def save_image(real_cpu,receptive_feild,ncs,epoch_num,file_name):
     fig,ax = plt.subplots(1)
@@ -74,16 +168,28 @@ def convert_image_np_2d(inp):
     # inp = std*
     return inp
 
-def generate_noise(size,num_samp=1,device='cuda',type='gaussian', scale=1):
+def generate_noise(size,num_samp=1,device='cuda',type='gaussian', scale=1, input_type='image'):
     if type == 'gaussian':
-        noise = torch.randn(num_samp, size[0], round(size[1]/scale), round(size[2]/scale), device=device)
-        noise = upsampling(noise,size[1], size[2])
-    if type =='gaussian_mixture':
-        noise1 = torch.randn(num_samp, size[0], size[1], size[2], device=device)+5
-        noise2 = torch.randn(num_samp, size[0], size[1], size[2], device=device)
-        noise = noise1+noise2
+        if len(size) == 3:
+            noise = torch.randn(num_samp, size[0], round(size[1] / scale), round(size[2] / scale), device=device)
+            noise = upsampling(noise, size[1], size[2])
+        else:
+            noise = torch.randn(1, num_samp, round(size[0] / scale), round(size[1] / scale), device=device)
+            noise = upsampling(noise, size[0], size[1])
+            noise = noise[0, :, :, :]
+    if type == 'gaussian_mixture':
+        if len(size) == 3:
+            noise1 = torch.randn(num_samp, size[0], size[1], size[2], device=device) + 5
+            noise2 = torch.randn(num_samp, size[0], size[1], size[2], device=device)
+        else:
+            noise1 = torch.randn(num_samp, size[0], size[1], device=device) + 5
+            noise2 = torch.randn(num_samp, size[0], size[1], device=device)
+        noise = noise1 + noise2
     if type == 'uniform':
-        noise = torch.randn(num_samp, size[0], size[1], size[2], device=device)
+        if len(size) == 3:
+            noise = torch.randn(num_samp, size[0], size[1], size[2], device=device)
+        else:
+            noise = torch.randn(num_samp, size[0], size[1], device=device)
     return noise
 
 def plot_learning_curves(G_loss,D_loss,epochs,label1,label2,name):
@@ -147,9 +253,50 @@ def calc_gradient_penalty(netD, real_data, fake_data, LAMBDA, device):
     return gradient_penalty
 
 def read_image(opt):
-    x = img.imread('%s/%s' % (opt.input_dir,opt.input_name))
+    if opt.conv_spectrogram == True:
+        opt.sample_rate, x = read('%s/%s' % (opt.input_dir, opt.input_name))
+        # align to 256
+        x = x[:x.shape[0] - (x.shape[0] % 256)]
+        # convert to spectrogram 256 x N
+        # f, t, x = signal.spectrogram(x, opt.sample_rate)
+        # assuming x length is 256 X N
+        x_mag = np.array([], dtype=float)
+        x_phase = np.array([], dtype=float)
+        for i in range(int(x.shape[0]/256)):
+            x_fft = np.fft.fft(x[256 * i : 256 * i + 256])
+            # f = np.fft.fftfreq(x_fft.shape[0]) * opt.sample_rate
+            x_mag = np.concatenate((x_mag.reshape(256, -1), np.log(np.abs(x_fft) ** 2 + 1).reshape(-1, 1)), axis=1)
+            x_phase = np.concatenate((x_phase.reshape(256, -1), np.angle(x_fft).reshape(-1, 1)), axis=1)
+        # strech x_mag, x_phase to (0-255)
+        opt.max_mag = np.max(x_mag)
+        x_mag = x_mag / opt.max_mag * 192 # strech to 3/4 of range
+        x_phase = (x_phase + math.pi) / (2 * math.pi) * 255
+        # stack magnitude and phase
+        # print('@ read_image: x_mag.shape = ', x_mag.shape)
+        # print('@ read_image: x_phase.shape = ', x_phase.shape)
+        x = np.stack((x_mag, x_phase))
+        # print('@ read_image: x.shape = ', x.shape)
+
+    else:
+        x = img.imread('%s/%s' % (opt.input_dir,opt.input_name))
+        # print("@ read_image: x.shape = ", x.shape)
+        # print("@ read_image: x = ", x)
     x = np2torch(x,opt)
     x = x[:,0:3,:,:]
+    # print("@ read_image: x.shape = ", x.shape)
+    # print("@ read_image: x = ", x)
+    return x
+
+def read_audio(opt):
+    opt.sample_rate, x = read('%s/%s' % (opt.input_dir,opt.input_name))
+    # print("@ read_image: x.shape = ", x.shape)
+    # print("@ read_image: x = ", x)
+    x = np.array(x, dtype=float)
+    x = np2torch(x, opt)
+    x = x.permute((0,2,1))
+    # print("@ read_audio: x.shape = ", x.shape)
+    # print("@ read_audio: x = ", x)
+    #x = x[:, 0:1, :, :]
     return x
 
 def read_image_dir(dir,opt):
@@ -159,19 +306,43 @@ def read_image_dir(dir,opt):
     return x
 
 def np2torch(x,opt):
-    if opt.nc_im == 3:
-        x = x[:,:,:,None]
-        x = x.transpose((3, 2, 0, 1))/255
+    if opt.input_type == 'image':
+        if opt.conv_spectrogram == True:
+            x = x[:, :, :, None]
+            x = x.transpose((3, 0, 1, 2)) / 255
+        else:
+            if opt.nc_im == 3:
+                x = x[:,:,:,None]
+                x = x.transpose((3, 2, 0, 1))/255
+                # print("@ read_image: x.shape = ", x.shape)
+                # print("@ read_image: x = ", x)
+            else:
+                x = color.rgb2gray(x)
+                x = x[:,:,None,None]
+                x = x.transpose(3, 2, 0, 1)
     else:
-        x = color.rgb2gray(x)
-        x = x[:,:,None,None]
-        x = x.transpose(3, 2, 0, 1)
+        # aviod norm / denorm (reverted)
+        if opt.audio_norm == True:
+            x = norm_audio(x)
+            x = (x + 1) / 2
+        else:
+            x = (x + 32768) / 65535 # audio file is normalized to [0,1]
+        # print('@ np2torch: max(inp)=', x.max(), ' | min(inp)=', x.min())
+        # x = x / 32768
+        x = x[:, None, None]
+        x = x.transpose(2, 0, 1)
+        # print("@ read_image: x.shape = ", x.shape)
+        # print("@ read_image: x = ", x)
     x = torch.from_numpy(x)
     if not(opt.not_cuda):
         x = move_to_gpu(x)
     x = x.type(torch.cuda.FloatTensor) if not(opt.not_cuda) else x.type(torch.FloatTensor)
     #x = x.type(torch.FloatTensor)
+    # aviod norm / denorm (reverted)
     x = norm(x)
+    # print('@ np2torch: max(inp)=', torch.max(x), ' | min(inp)=', torch.min(x))
+    # if opt.input_type == 'image':
+    #     x = norm(x)
     return x
 
 def torch2uint8(x):
@@ -206,23 +377,53 @@ def adjust_scales2image(real_,opt):
     return real
 
 def adjust_scales2image_SR(real_,opt):
-    opt.min_size = 18
-    opt.num_scales = int((math.log(opt.min_size / min(real_.shape[2], real_.shape[3]), opt.scale_factor_init))) + 1
-    scale2stop = int(math.log(min(opt.max_size , max(real_.shape[2], real_.shape[3])) / max(real_.shape[0], real_.shape[3]), opt.scale_factor_init))
-    opt.stop_scale = opt.num_scales - scale2stop
-    opt.scale1 = min(opt.max_size / max([real_.shape[2], real_.shape[3]]), 1)  # min(250/max([real_.shape[0],real_.shape[1]]),1)
-    real = imresize(real_, opt.scale1, opt)
-    #opt.scale_factor = math.pow(opt.min_size / (real.shape[2]), 1 / (opt.stop_scale))
-    opt.scale_factor = math.pow(opt.min_size/(min(real.shape[2],real.shape[3])),1/(opt.stop_scale))
-    scale2stop = int(math.log(min(opt.max_size, max(real_.shape[2], real_.shape[3])) / max(real_.shape[0], real_.shape[3]), opt.scale_factor_init))
-    opt.stop_scale = opt.num_scales - scale2stop
+    print("@ adjust_scales2image_SR: real_.shape = ", real_.shape)
+    if opt.input_type == 'image':
+        opt.min_size = 18
+        opt.num_scales = int((math.log(opt.min_size / min(real_.shape[2], real_.shape[3]), opt.scale_factor_init))) + 1
+        print("@ adjust_scales2image_SR: opt.num_scales = ", opt.num_scales)
+        scale2stop = int(math.log(min(opt.max_size , max(real_.shape[2], real_.shape[3])) / max(real_.shape[0], real_.shape[3]), opt.scale_factor_init))
+        print("@ adjust_scales2image_SR: scale2stop = ", scale2stop)
+        opt.stop_scale = opt.num_scales - scale2stop
+        print("@ adjust_scales2image_SR: opt.stop_scale = ", opt.stop_scale)
+        opt.scale1 = min(opt.max_size / max([real_.shape[2], real_.shape[3]]), 1)  # min(250/max([real_.shape[0],real_.shape[1]]),1)
+        print("@ adjust_scales2image_SR: opt.scale1 = ", opt.scale1)
+        real = imresize(real_, opt.scale1, opt)
+        print("@ adjust_scales2image_SR: real.shape = ", real.shape)
+        #opt.scale_factor = math.pow(opt.min_size / (real.shape[2]), 1 / (opt.stop_scale))
+        opt.scale_factor = math.pow(opt.min_size/(min(real.shape[2],real.shape[3])),1/(opt.stop_scale))
+        print("@ adjust_scales2image_SR: opt.scale_factor = ", opt.scale_factor)
+        scale2stop = int(math.log(min(opt.max_size, max(real_.shape[2], real_.shape[3])) / max(real_.shape[0], real_.shape[3]), opt.scale_factor_init))
+        print("@ adjust_scales2image_SR: scale2stop = ", scale2stop)
+        opt.stop_scale = opt.num_scales - scale2stop
+        print("@ adjust_scales2image_SR: opt.stop_scale = ", opt.stop_scale)
+    else:
+        opt.num_scales = int((math.log(opt.min_size / real_.shape[2], opt.scale_factor_init))) + 1
+        print("@ adjust_scales2image_SR: opt.num_scales = ", opt.num_scales)
+        scale2stop = int(math.log(min(opt.max_size, real_.shape[2]) / real_.shape[2], opt.scale_factor_init))
+        print("@ adjust_scales2image_SR: scale2stop = ", scale2stop)
+        opt.stop_scale = opt.num_scales - scale2stop
+        print("@ adjust_scales2image_SR: opt.stop_scale = ", opt.stop_scale)
+        opt.scale1 = min(opt.max_size / real_.shape[2], 1)  # min(250/max([real_.shape[0],real_.shape[1]]),1)
+        print("@ adjust_scales2image_SR: opt.scale1 = ", opt.scale1)
+        real = imresize(real_, opt.scale1, opt)
+        print("@ adjust_scales2image_SR: real.shape = ", real.shape)
+        # opt.scale_factor = math.pow(opt.min_size / (real.shape[2]), 1 / (opt.stop_scale))
+        opt.scale_factor = math.pow(opt.min_size / (real.shape[2]), 1 / (opt.stop_scale))
+        print("@ adjust_scales2image_SR: opt.scale_factor = ", opt.scale_factor)
+        scale2stop = int(math.log(min(opt.max_size, real_.shape[2]) / real_.shape[2], opt.scale_factor_init))
+        print("@ adjust_scales2image_SR: scale2stop = ", scale2stop)
+        opt.stop_scale = opt.num_scales - scale2stop
+        print("@ adjust_scales2image_SR: opt.stop_scale = ", opt.stop_scale)
     return real
 
 def creat_reals_pyramid(real,reals,opt):
-    real = real[:,0:3,:,:]
+    if opt.input_type == 'image':
+        real = real[:,0:3,:,:]
     for i in range(0,opt.stop_scale+1,1):
         scale = math.pow(opt.scale_factor,opt.stop_scale-i)
         curr_real = imresize(real,scale,opt)
+        # print('@ creat_reals_pyramid: curr_real.shape = ', curr_real.shape)
         reals.append(curr_real)
     return reals
 

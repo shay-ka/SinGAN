@@ -7,9 +7,13 @@ import torch.utils.data
 import math
 import matplotlib.pyplot as plt
 from SinGAN.imresize import imresize
+from scipy.io.wavfile import write
 
 def train(opt,Gs,Zs,reals,NoiseAmp):
-    real_ = functions.read_image(opt)
+    if opt.input_type == 'image':
+        real_ = functions.read_image(opt)
+    else:
+        real_ = functions.read_audio(opt)
     in_s = 0
     scale_num = 0
     real = imresize(real_,opt.scale1,opt)
@@ -29,7 +33,13 @@ def train(opt,Gs,Zs,reals,NoiseAmp):
 
         #plt.imsave('%s/in.png' %  (opt.out_), functions.convert_image_np(real), vmin=0, vmax=1)
         #plt.imsave('%s/original.png' %  (opt.out_), functions.convert_image_np(real_), vmin=0, vmax=1)
-        plt.imsave('%s/real_scale.png' %  (opt.outf), functions.convert_image_np(reals[scale_num]), vmin=0, vmax=1)
+        if opt.input_type == 'image':
+            if opt.conv_spectrogram == True:
+                write('%s/real_scale.wav' % (opt.outf), opt.sample_rate, functions.convert_spectrogram_np(reals[scale_num], opt))
+            else:
+                plt.imsave('%s/real_scale.png' %  (opt.outf), functions.convert_image_np(reals[scale_num]), vmin=0, vmax=1)
+        else:
+            write('%s/real_scale.wav' %  (opt.outf), opt.sample_rate, functions.convert_audio_np(reals[scale_num], opt))
 
         D_curr,G_curr = init_models(opt)
         if (nfc_prev==opt.nfc):
@@ -62,8 +72,15 @@ def train(opt,Gs,Zs,reals,NoiseAmp):
 def train_single_scale(netD,netG,reals,Gs,Zs,in_s,NoiseAmp,opt,centers=None):
 
     real = reals[len(Gs)]
-    opt.nzx = real.shape[2]#+(opt.ker_size-1)*(opt.num_layer)
-    opt.nzy = real.shape[3]#+(opt.ker_size-1)*(opt.num_layer)
+    #if opt.input_type == 'audio':
+    #    real = real.permute((0, 2, 1))
+    print("@ train_single_scale:real.shape = ", real.shape, "| opt.mode = ", opt.mode)
+    if opt.input_type == 'image':
+        opt.nzx = real.shape[2]#+(opt.ker_size-1)*(opt.num_layer)
+        opt.nzy = real.shape[3]#+(opt.ker_size-1)*(opt.num_layer)
+    else:
+        opt.nzx = real.shape[1]  # +(opt.ker_size-1)*(opt.num_layer)
+        opt.nzy = real.shape[2]  # +(opt.ker_size-1)*(opt.num_layer)
     opt.receptive_field = opt.ker_size + ((opt.ker_size-1)*(opt.num_layer-1))*opt.stride
     pad_noise = int(((opt.ker_size - 1) * opt.num_layer) / 2)
     pad_image = int(((opt.ker_size - 1) * opt.num_layer) / 2)
@@ -71,13 +88,23 @@ def train_single_scale(netD,netG,reals,Gs,Zs,in_s,NoiseAmp,opt,centers=None):
         opt.nzx = real.shape[2]+(opt.ker_size-1)*(opt.num_layer)
         opt.nzy = real.shape[3]+(opt.ker_size-1)*(opt.num_layer)
         pad_noise = 0
-    m_noise = nn.ZeroPad2d(int(pad_noise))
-    m_image = nn.ZeroPad2d(int(pad_image))
+    if opt.input_type == 'image':
+        m_noise = nn.ZeroPad2d(int(pad_noise))
+        m_image = nn.ZeroPad2d(int(pad_image))
+    else:
+        m_noise = nn.ConstantPad1d(int(pad_noise), 0)
+        m_image = nn.ConstantPad1d(int(pad_image), 0)
+    print("m_noise")
 
     alpha = opt.alpha
 
-    fixed_noise = functions.generate_noise([opt.nc_z,opt.nzx,opt.nzy],device=opt.device)
+    if opt.input_type == 'image':
+        fixed_noise = functions.generate_noise([opt.nc_z,opt.nzx,opt.nzy],device=opt.device)
+    else:
+        fixed_noise = functions.generate_noise([opt.nzx, opt.nzy], device=opt.device)
+    print("fixed_noise.shape = ", fixed_noise.shape)
     z_opt = torch.full(fixed_noise.shape, 0, device=opt.device)
+    #z_opt = torch.full(fixed_noise.shape, 0, device=opt.device, dtype=int)
     z_opt = m_noise(z_opt)
 
     # setup optimizer
@@ -94,13 +121,31 @@ def train_single_scale(netD,netG,reals,Gs,Zs,in_s,NoiseAmp,opt,centers=None):
 
     for epoch in range(opt.niter):
         if (Gs == []) & (opt.mode != 'SR_train'):
-            z_opt = functions.generate_noise([1,opt.nzx,opt.nzy], device=opt.device)
-            z_opt = m_noise(z_opt.expand(1,3,opt.nzx,opt.nzy))
-            noise_ = functions.generate_noise([1,opt.nzx,opt.nzy], device=opt.device)
-            noise_ = m_noise(noise_.expand(1,3,opt.nzx,opt.nzy))
+            if opt.input_type == 'image':
+                z_opt = functions.generate_noise([1, opt.nzx, opt.nzy], device=opt.device)
+                if opt.conv_spectrogram == True:
+                    z_opt = m_noise(z_opt.expand(1,2,opt.nzx,opt.nzy))
+                else:
+                    z_opt = m_noise(z_opt.expand(1,3,opt.nzx,opt.nzy))
+            else:
+                z_opt = functions.generate_noise([opt.nzx, opt.nzy], device=opt.device)
+                z_opt = m_noise(z_opt)
+            if opt.input_type == 'image':
+                noise_ = functions.generate_noise([1, opt.nzx, opt.nzy], device=opt.device)
+                if opt.conv_spectrogram == True:
+                    noise_ = m_noise(noise_.expand(1, 2, opt.nzx, opt.nzy))
+                else:
+                    noise_ = m_noise(noise_.expand(1,3,opt.nzx,opt.nzy))
+            else:
+                noise_ = functions.generate_noise([opt.nzx, opt.nzy], device=opt.device)
+                noise_ = m_noise(noise_)
         else:
-            noise_ = functions.generate_noise([opt.nc_z,opt.nzx,opt.nzy], device=opt.device)
-            noise_ = m_noise(noise_)
+            if opt.input_type == 'image':
+                noise_ = functions.generate_noise([opt.nc_z,opt.nzx,opt.nzy], device=opt.device)
+                noise_ = m_noise(noise_)
+            else:
+                noise_ = functions.generate_noise([opt.nzx, opt.nzy], device=opt.device)
+                noise_ = m_noise(noise_)
 
         ############################
         # (1) Update D network: maximize D(x) + D(G(z))
@@ -109,7 +154,14 @@ def train_single_scale(netD,netG,reals,Gs,Zs,in_s,NoiseAmp,opt,centers=None):
             # train with real
             netD.zero_grad()
 
+            if epoch % 100 == 0:
+                print("@ train_single_scale: epoch = ", epoch, "| real.shape = ", real.shape)
+            # if opt.input_type == 'audio':
+            #     real = real.permute((0,2,1))
+            #     print("@ train_single_scale: real.shape = ", real.shape)
             output = netD(real).to(opt.device)
+            # if opt.input_type == 'audio':
+            #     real = real.permute((0,2,1))
             #D_real_map = output.detach()
             errD_real = -output.mean()#-a
             errD_real.backward(retain_graph=True)
@@ -118,17 +170,27 @@ def train_single_scale(netD,netG,reals,Gs,Zs,in_s,NoiseAmp,opt,centers=None):
             # train with fake
             if (j==0) & (epoch == 0):
                 if (Gs == []) & (opt.mode != 'SR_train'):
-                    prev = torch.full([1,opt.nc_z,opt.nzx,opt.nzy], 0, device=opt.device)
+                    if opt.input_type == 'image':
+                        prev = torch.full([1,opt.nc_z,opt.nzx,opt.nzy], 0, device=opt.device)
+                    else:
+                        prev = torch.full([1, opt.nzx, opt.nzy], 0, device=opt.device)
                     in_s = prev
                     prev = m_image(prev)
-                    z_prev = torch.full([1,opt.nc_z,opt.nzx,opt.nzy], 0, device=opt.device)
+                    if opt.input_type == 'image':
+                        z_prev = torch.full([1,opt.nc_z,opt.nzx,opt.nzy], 0, device=opt.device)
+                    else:
+                        z_prev = torch.full([1, opt.nzx, opt.nzy], 0, device=opt.device)
+                    print("@ train_single_scale: z_prev.shape =", z_prev.shape)
                     z_prev = m_noise(z_prev)
                     opt.noise_amp = 1
                 elif opt.mode == 'SR_train':
                     z_prev = in_s
                     criterion = nn.MSELoss()
+                    print('@ train_single_scale: real.shape = ', real.shape, '| z_prev.shape = ', z_prev.shape)
                     RMSE = torch.sqrt(criterion(real, z_prev))
+                    print("@ train_single_scale: RMSE.shape = ", RMSE.shape)
                     opt.noise_amp = opt.noise_amp_init * RMSE
+                    print("@ train_single_scale: z_prev.shape = ", z_prev.shape)
                     z_prev = m_image(z_prev)
                     prev = z_prev
                 else:
@@ -136,6 +198,7 @@ def train_single_scale(netD,netG,reals,Gs,Zs,in_s,NoiseAmp,opt,centers=None):
                     prev = m_image(prev)
                     z_prev = draw_concat(Gs,Zs,reals,NoiseAmp,in_s,'rec',m_noise,m_image,opt)
                     criterion = nn.MSELoss()
+                    print('@ train_single_scale: real.shape = ', real.shape, '| z_prev.shape = ', z_prev.shape)
                     RMSE = torch.sqrt(criterion(real, z_prev))
                     opt.noise_amp = opt.noise_amp_init*RMSE
                     z_prev = m_image(z_prev)
@@ -152,7 +215,13 @@ def train_single_scale(netD,netG,reals,Gs,Zs,in_s,NoiseAmp,opt,centers=None):
             else:
                 noise = opt.noise_amp*noise_+prev
 
+            if epoch % 100 == 0:
+                print("@ train_single_scale: noise.detach().shape = ", noise.detach().shape, "prev.shape = ", prev.shape, "epoch = ", epoch, "j = ", j)
+            # if opt.input_type == 'audio':
+            #     noise = noise.permute((0, 2, 1))
             fake = netG(noise.detach(),prev)
+            # if opt.input_type == 'audio':
+            #     noise = noise.permute((0, 2, 1))
             output = netD(fake.detach())
             errD_fake = output.mean()
             errD_fake.backward(retain_graph=True)
@@ -200,15 +269,22 @@ def train_single_scale(netD,netG,reals,Gs,Zs,in_s,NoiseAmp,opt,centers=None):
             print('scale %d:[%d/%d]' % (len(Gs), epoch, opt.niter))
 
         if epoch % 500 == 0 or epoch == (opt.niter-1):
-            plt.imsave('%s/fake_sample.png' %  (opt.outf), functions.convert_image_np(fake.detach()), vmin=0, vmax=1)
-            plt.imsave('%s/G(z_opt).png'    % (opt.outf),  functions.convert_image_np(netG(Z_opt.detach(), z_prev).detach()), vmin=0, vmax=1)
-            #plt.imsave('%s/D_fake.png'   % (opt.outf), functions.convert_image_np(D_fake_map))
-            #plt.imsave('%s/D_real.png'   % (opt.outf), functions.convert_image_np(D_real_map))
-            #plt.imsave('%s/z_opt.png'    % (opt.outf), functions.convert_image_np(z_opt.detach()), vmin=0, vmax=1)
-            #plt.imsave('%s/prev.png'     %  (opt.outf), functions.convert_image_np(prev), vmin=0, vmax=1)
-            #plt.imsave('%s/noise.png'    %  (opt.outf), functions.convert_image_np(noise), vmin=0, vmax=1)
-            #plt.imsave('%s/z_prev.png'   % (opt.outf), functions.convert_image_np(z_prev), vmin=0, vmax=1)
-
+            if opt.input_type == 'image':
+                if opt.conv_spectrogram == True:
+                    write('%s/fake_sample.wav' % (opt.outf), opt.sample_rate, functions.convert_spectrogram_np(fake.detach(), opt))
+                    write('%s/G(z_opt).wav' % (opt.outf), opt.sample_rate, functions.convert_spectrogram_np(netG(Z_opt.detach(), z_prev).detach(), opt))
+                else:
+                    plt.imsave('%s/fake_sample.png' %  (opt.outf), functions.convert_image_np(fake.detach()), vmin=0, vmax=1)
+                    plt.imsave('%s/G(z_opt).png'    % (opt.outf),  functions.convert_image_np(netG(Z_opt.detach(), z_prev).detach()), vmin=0, vmax=1)
+                    #plt.imsave('%s/D_fake.png'   % (opt.outf), functions.convert_image_np(D_fake_map))
+                    #plt.imsave('%s/D_real.png'   % (opt.outf), functions.convert_image_np(D_real_map))
+                    #plt.imsave('%s/z_opt.png'    % (opt.outf), functions.convert_image_np(z_opt.detach()), vmin=0, vmax=1)
+                    #plt.imsave('%s/prev.png'     %  (opt.outf), functions.convert_image_np(prev), vmin=0, vmax=1)
+                    #plt.imsave('%s/noise.png'    %  (opt.outf), functions.convert_image_np(noise), vmin=0, vmax=1)
+                    #plt.imsave('%s/z_prev.png'   % (opt.outf), functions.convert_image_np(z_prev), vmin=0, vmax=1)
+            else:
+                write('%s/fake_sample.wav' %  (opt.outf), opt.sample_rate, functions.convert_audio_np(fake.detach(), opt))
+                write('%s/G(z_opt).wav' % (opt.outf), opt.sample_rate, functions.convert_audio_np(netG(Z_opt.detach(), z_prev).detach(), opt))
 
             torch.save(z_opt, '%s/z_opt.pth' % (opt.outf))
 
@@ -216,9 +292,12 @@ def train_single_scale(netD,netG,reals,Gs,Zs,in_s,NoiseAmp,opt,centers=None):
         schedulerG.step()
 
     functions.save_networks(netG,netD,z_opt,opt)
+    #if opt.input_type == 'audio':
+    #    real = real.permute((0, 2, 1))
     return z_opt,in_s,netG    
 
 def draw_concat(Gs,Zs,reals,NoiseAmp,in_s,mode,m_noise,m_image,opt):
+    #print("@ draw_concat")
     G_z = in_s
     if len(Gs) > 0:
         if mode == 'rand':
@@ -227,28 +306,61 @@ def draw_concat(Gs,Zs,reals,NoiseAmp,in_s,mode,m_noise,m_image,opt):
             if opt.mode == 'animation_train':
                 pad_noise = 0
             for G,Z_opt,real_curr,real_next,noise_amp in zip(Gs,Zs,reals,reals[1:],NoiseAmp):
+                # print("@ draw_concat: Z_opt.shape = ", Z_opt.shape, "| real_curr.shape = ", real_curr.shape, "| real_next.shape = ", real_next.shape)
                 if count == 0:
-                    z = functions.generate_noise([1, Z_opt.shape[2] - 2 * pad_noise, Z_opt.shape[3] - 2 * pad_noise], device=opt.device)
-                    z = z.expand(1, 3, z.shape[2], z.shape[3])
+                    if opt.input_type == 'image':
+                        z = functions.generate_noise([1, Z_opt.shape[2] - 2 * pad_noise, Z_opt.shape[3] - 2 * pad_noise], device=opt.device)
+                        if opt.conv_spectrogram == True:
+                            z = z.expand(1, 2, z.shape[2], z.shape[3])
+                        else:
+                            z = z.expand(1, 3, z.shape[2], z.shape[3])
+                    else:
+                        z = functions.generate_noise([1, Z_opt.shape[2] - 2 * pad_noise], device=opt.device)
                 else:
-                    z = functions.generate_noise([opt.nc_z,Z_opt.shape[2] - 2 * pad_noise, Z_opt.shape[3] - 2 * pad_noise], device=opt.device)
+                    if opt.input_type == 'image':
+                        z = functions.generate_noise([opt.nc_z,Z_opt.shape[2] - 2 * pad_noise, Z_opt.shape[3] - 2 * pad_noise], device=opt.device)
+                    else:
+                        z = functions.generate_noise([1, Z_opt.shape[2] - 2 * pad_noise],device=opt.device)
                 z = m_noise(z)
-                G_z = G_z[:,:,0:real_curr.shape[2],0:real_curr.shape[3]]
+                # print("@ draw_concat: G_z.shape = ", G_z.shape)
+                if opt.input_type == 'image':
+                    G_z = G_z[:,:,0:real_curr.shape[2],0:real_curr.shape[3]]
+                else:
+                    G_z = G_z[:, :, 0:max(real_curr.shape[1],real_curr.shape[2])]
                 G_z = m_image(G_z)
                 z_in = noise_amp*z+G_z
                 G_z = G(z_in.detach(),G_z)
+                # if opt.input_type == 'audio':
+                #    G_z = G_z.permute((0, 2, 1))
                 G_z = imresize(G_z,1/opt.scale_factor,opt)
-                G_z = G_z[:,:,0:real_next.shape[2],0:real_next.shape[3]]
+                # if opt.input_type == 'audio':
+                #     G_z = G_z.permute((0, 2, 1))
+                if opt.input_type == 'image':
+                    G_z = G_z[:,:,0:real_next.shape[2],0:real_next.shape[3]]
+                else:
+                    G_z = G_z[:, :, 0:real_next.shape[2]]
+                # print("@ draw_concat: G_z.shape = ", G_z.shape)
                 count += 1
         if mode == 'rec':
             count = 0
             for G,Z_opt,real_curr,real_next,noise_amp in zip(Gs,Zs,reals,reals[1:],NoiseAmp):
-                G_z = G_z[:, :, 0:real_curr.shape[2], 0:real_curr.shape[3]]
+                # print("@ draw_concat: Z_opt.shape = ", Z_opt.shape, "| real_curr.shape = ", real_curr.shape, "| real_next.shape = ", real_next.shape)
+                if opt.input_type == 'image':
+                    G_z = G_z[:, :, 0:real_curr.shape[2], 0:real_curr.shape[3]]
+                else:
+                    G_z = G_z[:, :, 0:max(real_curr.shape[1],real_curr.shape[2])]
                 G_z = m_image(G_z)
                 z_in = noise_amp*Z_opt+G_z
                 G_z = G(z_in.detach(),G_z)
+                # if opt.input_type == 'audio':
+                #     G_z = G_z.permute((0, 2, 1))
                 G_z = imresize(G_z,1/opt.scale_factor,opt)
-                G_z = G_z[:,:,0:real_next.shape[2],0:real_next.shape[3]]
+                # if opt.input_type == 'audio':
+                #     G_z = G_z.permute((0, 2, 1))
+                if opt.input_type == 'image':
+                    G_z = G_z[:,:,0:real_next.shape[2],0:real_next.shape[3]]
+                else:
+                    G_z = G_z[:, :, 0:max(real_next.shape[1],real_next.shape[2])]
                 #if count != (len(Gs)-1):
                 #    G_z = m_image(G_z)
                 count += 1
